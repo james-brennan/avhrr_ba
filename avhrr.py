@@ -17,6 +17,8 @@ TODO
   *  Just noticed get negative reflectance when not enough obs for kernels...
 """
 
+global ysize
+global xsize
 
 __author__ = "James Brennan"
 __copyright__ = "Copyright 2019 James Brennan"
@@ -61,7 +63,7 @@ def bitMask(qa, bitStart, bitLength, bitString="00"):
     mask = (qa & posValue) == conValue
     return mask
 
-def apply_QA_AVHRR(qa, refl):
+def apply_QA_AVHRR(qa, b1_refl, b2_refl):
     """
     make a QA mask
     """
@@ -72,15 +74,17 @@ def apply_QA_AVHRR(qa, refl):
     no_cloud_shdow = bitMask(qa, 1, 1, bitString="0")
     no_brdf_iss = bitMask(qa, 14, 1, bitString="0")
     qa_mask = notNight & no_sunglint & land_pixel & no_cloud & no_cloud_shdow
+    qa_mask2 = notNight * no_sunglint * land_pixel * no_cloud * no_cloud_shdow
     #qa_mask = notNight & no_sunglint & land_pixel & no_cloud
     dark_dense_veg = bitMask(qa, 5, 1, bitString="1")
     """
     check refl is sensible
     """
-    refl_mask = np.logical_and(refl>0, refl<1)
+    refl_mask = np.logical_and(b1_refl>0, b1_refl<1)
     # check NDVI is sensible eg 0.1-1
-
-    mask = qa_mask & refl_mask
+    ndvi = (b2_refl-b1_refl)/(b2_refl+b1_refl)
+    ndvi_mask = np.logical_and(ndvi>0.05, ndvi<0.99)
+    mask = qa_mask * refl_mask * ndvi_mask
     return mask
 
 
@@ -242,7 +246,7 @@ def load_avhrr(ymin, ymax, xmin, xmax, ucl=False):
             """
             do qa
             """
-            mask = apply_QA_AVHRR(qa, b1)
+            mask = apply_QA_AVHRR(qa, b1, b2)
             # save them
             B1[t] = b1
             B2[t]= b2
@@ -268,9 +272,8 @@ def load_avhrr(ymin, ymax, xmin, xmax, ucl=False):
     return refl, SZA, VZA, RAA
 
 
-def load_spectral_prior(ymin, ymax, xmin, xmax):
-    ff = '/space/zcfah19/priors.tif'
-    arr = gdal.Open(ff).ReadAsArray(yoff=ymin, xoff=xmin, xsize=xsize, ysize=ysize)
+def load_spectral_prior(file_, ymin, ymax, xmin, xmax):
+    arr = gdal.Open(file_).ReadAsArray(yoff=int(ymin), xoff=int(xmin), xsize=int(xsize), ysize=int(ysize))
     return arr
 
 
@@ -311,7 +314,7 @@ def do_BRDF_correction(refl, vza, sza, raa):
                 kerns =  Kernels(_vza, _sza, _raa,
                                 LiType='Sparse', doIntegrals=False,
                                 normalise=True, RecipFlag=True, RossHS=False, MODISSPARSE=True,
-                                RossType='Thick',nbar=0.0)
+                                RossType='Thick')
                 K = np.stack((kerns.Isotropic, kerns.Ross, kerns.Li)).T
                 # mask
                 K =K[m]
@@ -413,6 +416,31 @@ if __name__ == "__main__":
     xmin = 3900
     xmax = 4300
 
+    # Africa 2
+    ymin = 1518
+    ymax = ymin + 200
+    xmin = 4100
+    xmax = xmin + 200
+
+    # Africa 3
+    ymin = 1930
+    ymax = ymin + 200
+    xmin = 3880
+    xmax = xmin + 200
+
+    # north america /alaska
+    ymin = 640
+    ymax = ymin + 200
+    xmin = 1240
+    xmax = xmin + 200
+
+    # china
+    ymin = 810
+    ymax = ymin + 200
+    xmin = 6060
+    xmax = xmin + 200
+
+
 
     # get parsed extent
     ymin = options.ymin
@@ -425,16 +453,62 @@ if __name__ == "__main__":
     outdir = options.outdir
 
 
+    # us2
+    ymin = 970
+    ymax = ymin + 200
+    xmin = 1740
+    xmax = xmin +200
+
+
+    # alaska
+    ymin = 500
+    ymax = ymin + 200
+    xmin = 1350
+    xmax = 1350 + 200
+
     # get size
-    global ysize
-    global xsize
+    import builtins
+
     ysize = ymax - ymin
     xsize = xmax - xmin
+    builtins.ysize = ysize
+    builtins.xsize = xsize
+
+    # phenology NA
+    name = 'us_pheno'
+    ymin = 940
+    ymax = ymin +200
+    xmin = 1700
+    xmax = xmin + 200
+    # get size
+    ysize = ymax - ymin
+    xsize = xmax - xmin
+    builtins.ysize = ysize
+    builtins.xsize = xsize
+
+
+
     """
     Load AVHRR
     """
-    refl, sza, vza, raa = load_avhrr(ymin, ymax, xmin, xmax, ucl=False)
-    logger.info("Loaded data")
+    refl, sza, vza, raa = load_avhrr(ymin, ymax, xmin, xmax, ucl=True)
+
+
+    # load africa fires
+    dd = np.load("africa_fires_3950_1580.npz")
+    refl = dd['refl']
+    sza = dd['sza']
+    vza = dd['vza']
+    raa = dd['raa']
+    mask = dd['mask']
+
+
+    sza = np.ma.array(mask=mask, data=sza)
+    vza = np.ma.array(mask=mask, data=vza)
+    raa = np.ma.array(mask=mask, data=raa)
+    refl = np.ma.array(mask=np.swapaxes(np.stack([mask, mask]), 0,1), data=refl)
+
+
 
     """
     Load MODIS kernel priors
@@ -445,25 +519,27 @@ if __name__ == "__main__":
     """
     Do BRDF correction...
     """
-    do_BRDF_correction(refl, vza, sza, raa)
-    logger.info("Done BRDF correction")
+    kWeights = do_BRDF_correction(refl, vza, sza, raa)
+    #logger.info("Done BRDF correction")
     del sza
     del raa
     """
     Run the edge preserving
     """
+    # pre-make the D matrix for speed
     nT = len(refl)
+    Dmat = make_D_matrix(nT)
     filled = np.zeros((nT, 2, ysize, xsize), dtype=np.float32)
-    #filled_unc = np.zeros((nT, 2, ysize, xsize))
+    filled_unc = np.zeros((nT, 2, ysize, xsize))
     for y in range(0, ysize):
         for x in range(xsize):
             m = (~refl[:, 1, y,x].mask).sum()
             if m > 10:
-                sol,unc,w = regularisation(~refl[:, 1,y, x].mask, refl[:, :, y, x])
+                # use about 500
+                sol,unc,w = regularisation(~refl[:, 1,y, x].mask, refl[:, :, y, x], alpha=1, _D=Dmat)
                 filled[:, :, y, x]=sol
-                #filled_unc[:,:, y,x]=unc
+                filled_unc[:,:, y,x]=unc
     del vza
-    logger.info("Done DA")
 
     """
     Check ndvi again...
@@ -474,15 +550,17 @@ if __name__ == "__main__":
     bad_ndvi = np.logical_or(ndvi<0.1, ndvi>1.1)
     # mask filled with this
     filled = np.ma.array(data=filled, mask = np.stack((bad_ndvi, bad_ndvi)).swapaxes(0,1))
+    filled_unc = np.ma.array(data=filled_unc, mask = np.stack((bad_ndvi, bad_ndvi)).swapaxes(0,1))
     """
     Load and produce spectral priors
     """
-    #fcc_prior, a0_prior, a1_prior = load_spectral_prior(ymin, ymax, xmin, xmax)
-
+    #fcc_prior, a0_prior, a1_prior = load_spectral_prior("priors.tif", ymin, ymax, xmin, xmax)
+    a0_prior, a1_prior, fcc_prior = load_spectral_prior("prior_mean.tif", ymin, ymax, xmin, xmax)
+    a0s_prior, a1s_prior, fcc_prior = load_spectral_prior("prior_std.tif", ymin, ymax, xmin, xmax)
     """
     Try fcc with fixed burn signal
     """
-    wavelengths = np.array([630., 858.5])
+    wavelengths = np.array([640., 860])
     loff = 400.
     lmax = 2000.
     ll =  wavelengths - loff
@@ -492,7 +570,14 @@ if __name__ == "__main__":
     a0 = 0.02
     a1 = 0.25
     #make the burn signal
-    burn_signal = np.ones(2) * a0 + a1 * lk
+    #burn_signal = np.ones(2) * a0 + a1 * lk
+
+    """
+    Make the spatial burn signals
+    """
+    burn_signal = np.ones((ysize, xsize)) * a0_prior + a1_prior * lk[:, None, None]
+
+
     """
     solve it all big style
 
@@ -504,24 +589,59 @@ if __name__ == "__main__":
     (1/K.T.dot(K)).dot(K.T).dot(obs)
     """
     fcc = np.zeros((nT, ysize, xsize))
+    fcc_unc = np.zeros((nT, ysize, xsize))
     rmse = np.zeros((nT, ysize, xsize))
     # add a little border
-    for t in range(32, nT-32):
-        pre = filled[t-4]
-        post = filled[t+4]
-        K = burn_signal[:, None] - pre.reshape((2, -1))
+
+    """
+    We want to weight the signal more
+    towards the change in the NIR
+    bigger fire signal
+    so W matrix too
+    W = 0.33, 0.66
+    """
+    _w = np.array([.1, .9])
+    W = np.ones((2, ysize*xsize))
+    W.T[:]=_w
+
+    for t in range(1, nT-1):
+        pre = filled[t-1]
+        post = filled[t]
+        pre_unc = filled_unc[t-1]
+        post_unc = filled_unc[t]
+        K = burn_signal.reshape((2, -1)) - pre.reshape((2, -1))
         obs = post.reshape((2, -1)) - pre.reshape((2, -1))
+        C = 1/(pre_unc**2 + post_unc**2).reshape((2, -1))
+        #C = C*W
         """
         Solve it
+        without band weighting for now
         """
-        KTK = (K.T * K.T).sum(axis=1)
+        #KTK = (K.T *C.T * K.T).sum(axis=1)
+        KTK = (K.T*K.T).sum(axis=1)
         Inv = 1/KTK
-        _fcc= (Inv * K * obs).sum(axis=0)
+        #_fcc= (Inv * K * C * obs).sum(axis=0)
+        _fcc = (Inv * K * obs).sum(axis=0)
         err = np.sqrt((((K * _fcc) - obs)**2).sum(axis=0))
         fcc[t]=_fcc.reshape((ysize, xsize))
         rmse[t]= err.reshape((ysize, xsize))
+        """
+        get the uncertainty in fcc
+        Given the use of the weights matrix
+        its different
+        https://en.wikipedia.org/wiki/Weighted_least_squares
+        M^\beta = (X^{\rm T} W X)^{-1} X^{\rm T}
+                    W M W^{\rm T} X (X^{\rm T} W^{\rm T} X)^{-1}
+        """
+        #a = (1/(K.T*W.T*K.T))
+        #b = (K.T * W.T * C.T *W.T *K.T)
+        #_fcc_unc = a * b *a
+        # Do the inverse again
+        KTK = (K.T *C.T * K.T).sum(axis=1)
+        Inv = 1/KTK
+        fcc_unc[t]=np.sqrt(Inv.reshape((ysize, xsize)))
 
-    logger.info("Done fcc calculation")
+    #logger.info("Done fcc calculation")
     """
     Record maximum fc
     """
@@ -532,16 +652,16 @@ if __name__ == "__main__":
     dob = np.ma.argmax(fcc, axis=0)
     #error = rmse[dob]
     error = np.take_along_axis(rmse, dob.reshape((1, ysize, xsize)), axis=0)[0]
+    unc = np.take_along_axis(fcc_unc, dob.reshape((1, ysize, xsize)), axis=0)[0]
+
     """
     Produce a proto product
 
     - want to save cc max, rmse, dob into a file
     """
-    logger.info("Writing files")
-    outdir ='./'
+    #logger.info("Writing files")
+    outdir ='./outputs/'
     outfile = outdir + f'BA_AVHRR_2001_{ymin}_{xmin}.npz'
-    np.savez(outfile, fcc=cc, dob=dob, rmse=error)
+    np.savez(outfile, fcc=cc, dob=dob, rmse=error, unc=unc)
     logger.info("Written files. ")
     logger.info("Finished. ")
-
-
